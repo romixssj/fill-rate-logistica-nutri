@@ -1,0 +1,7 @@
+# Archivos de datos locales
+inventario_lacteos.json
+*.pyc
+__pycache__/
+.env
+.venv/
+*.log
