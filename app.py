@@ -3,7 +3,8 @@ Dashboard de Control Logístico - Lácteos San Antonio C.A.
 Calcula el Fill Rate cruzando Órdenes de Compra con Facturación.
 
 Fuentes de datos soportadas:
-  - Facturación: XLSX o CSV con columnas 'Material' y 'Cantidad facturada'
+    - Facturación: XLSX o CSV con columnas 'Cantidad facturada' y referencia
+                                 (preferido: 'Referencia del cliente'; fallback: 'Material')
   - Orden de Compra: HTML (El Rosado, tabla #AutoNumber2) o
                      XLS/XLSX (formato SMX con filas tipo '1','2','3')
 """
@@ -87,6 +88,18 @@ def normalize_order_number(value: str) -> str:
     return text
 
 
+def normalize_reference(value: str) -> str:
+    """Normaliza referencias de cliente/material para el cruce."""
+    text = str(value).strip().upper()
+    if text.lower() in ("", "nan", "none"):
+        return ""
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[^A-Z0-9-]", "", text)
+    if text.isdigit():
+        return text.lstrip("0") or "0"
+    return text
+
+
 def extract_order_number(text: str = "", filename: str = "") -> str:
     """Busca un número de orden en texto libre o en el nombre del archivo."""
     search_targets = [text or "", filename or ""]
@@ -115,6 +128,8 @@ def aggregate_order_lines(df: pd.DataFrame, quantity_column: str) -> pd.DataFram
         return df
 
     agg_map = {quantity_column: "sum"}
+    if "Referencia_Cruce" in df.columns:
+        agg_map["Referencia_Cruce"] = "first"
     if "Material_Ref" in df.columns:
         agg_map["Material_Ref"] = "first"
     if "Descripcion_OC" in df.columns:
@@ -129,7 +144,7 @@ def aggregate_order_lines(df: pd.DataFrame, quantity_column: str) -> pd.DataFram
         agg_map["Unidades_Solicitadas"] = "sum"
 
     return (
-        df.groupby(["Numero_Orden", "Material_Norm"], as_index=False)
+        df.groupby(["Numero_Orden", "Referencia_Cruce_Norm"], as_index=False)
         .agg(agg_map)
     )
 
@@ -149,6 +164,14 @@ def validate_order_sets(df_oc: pd.DataFrame, df_fact: pd.DataFrame, manual_order
         raise ValueError(
             "❌ No se pudo identificar el número de orden en todos los archivos. "
             "Agrega una columna de orden en facturación, usa nombres de archivo con la orden o completa el campo manual en la barra lateral."
+        )
+
+    missing_ref_oc = (df_oc["Referencia_Cruce_Norm"].astype(str).str.strip() == "").any()
+    missing_ref_fact = (df_fact["Referencia_Cruce_Norm"].astype(str).str.strip() == "").any()
+    if missing_ref_oc or missing_ref_fact:
+        raise ValueError(
+            "❌ Hay referencias vacías en los archivos. El cruce exige número de orden + referencia del cliente/material. "
+            "Revisa la columna de referencia en facturación y las referencias en la orden de compra."
         )
 
     oc_orders = set(df_oc["Numero_Orden"].astype(str))
@@ -224,6 +247,8 @@ def parse_html_order(raw_bytes: bytes, filename: str = "") -> pd.DataFrame:
             items.append(
                 {
                     "Numero_Orden":         order_number,
+                    "Referencia_Cruce":     referencia,
+                    "Referencia_Cruce_Norm": normalize_reference(referencia),
                     "Material_Ref":          referencia,
                     "Material_Norm":         normalize_code(referencia),
                     "Descripcion_OC":        descripcion,
@@ -299,6 +324,8 @@ def parse_smx_order(raw_bytes: bytes, filename: str = "") -> pd.DataFrame:
             items.append(
                 {
                     "Numero_Orden":         order_number,
+                    "Referencia_Cruce":     referencia,
+                    "Referencia_Cruce_Norm": normalize_reference(referencia),
                     "Material_Ref":          referencia,
                     "Material_Norm":         normalize_code(referencia),
                     "Descripcion_OC":        descripcion,
@@ -324,7 +351,8 @@ def parse_billing(raw_bytes: bytes, filename: str, fallback_order_number: str = 
     """
     Carga el reporte de facturación y lo agrupa por código de material.
 
-    Columnas requeridas: 'Material', 'Cantidad facturada'
+    Columnas requeridas: 'Cantidad facturada' y referencia
+    (preferido 'Referencia del cliente', fallback 'Material')
     Columna opcional:    'Descripcion'
     """
     try:
@@ -340,12 +368,30 @@ def parse_billing(raw_bytes: bytes, filename: str, fallback_order_number: str = 
         raise ValueError(f"❌ No se pudo leer el archivo de facturación: {e}")
 
     # Verificar columnas requeridas
-    required = {"Material", "Cantidad facturada"}
-    missing  = required - set(df.columns)
+    required = {"Cantidad facturada"}
+    missing = required - set(df.columns)
     if missing:
         raise ValueError(
             f"❌ El archivo de facturación no contiene las columnas: {missing}. "
             f"Columnas encontradas: {list(df.columns)}"
+        )
+
+    ref_column = detect_column(
+        df.columns,
+        [
+            "Referencia del cliente",
+            "Referencia cliente",
+            "Ref cliente",
+            "Cod cliente",
+            "Codigo cliente",
+            "Referencia",
+            "Material",
+        ],
+    )
+    if not ref_column:
+        raise ValueError(
+            "❌ El archivo de facturación debe incluir una columna de referencia "
+            "(ideal: 'Referencia del cliente'; también se acepta 'Material')."
         )
 
     # Convertir cantidad a numérico
@@ -353,8 +399,9 @@ def parse_billing(raw_bytes: bytes, filename: str, fallback_order_number: str = 
         lambda x: to_float_safe(str(x).replace(",", "."))
     )
 
-    # Normalizar código de material
-    df["Material_Norm"] = df["Material"].apply(normalize_code)
+    # Referencia de cruce (prioridad a referencia del cliente)
+    df["Referencia_Cruce"] = df[ref_column].astype(str).str.strip()
+    df["Referencia_Cruce_Norm"] = df["Referencia_Cruce"].apply(normalize_reference)
 
     # Detectar número de orden
     order_column = detect_column(
@@ -382,7 +429,8 @@ def parse_billing(raw_bytes: bytes, filename: str, fallback_order_number: str = 
     if "Descripcion" in df.columns:
         agg_dict["Descripcion"] = "first"
 
-    grouped = df.groupby(["Numero_Orden", "Material_Norm"]).agg(agg_dict).reset_index()
+    agg_dict["Referencia_Cruce"] = "first"
+    grouped = df.groupby(["Numero_Orden", "Referencia_Cruce_Norm"]).agg(agg_dict).reset_index()
     grouped.rename(columns={"Cantidad facturada": "Unidades_Facturadas"}, inplace=True)
 
     if "Descripcion" in grouped.columns:
@@ -417,8 +465,20 @@ def compute_fill_rate(df_oc: pd.DataFrame, df_fact: pd.DataFrame) -> pd.DataFram
       - Fill_Rate_%          (facturado / solicitado × 100, tope 100 %)
       - Brecha_Unidades      (solicitado – facturado, mínimo 0)
     """
-    merged = df_oc.merge(df_fact, on=["Numero_Orden", "Material_Norm"], how="left")
+    merged = df_oc.merge(
+        df_fact,
+        on=["Numero_Orden", "Referencia_Cruce_Norm"],
+        how="left",
+        suffixes=("_OC", "_FACT"),
+    )
     merged["Unidades_Facturadas"] = merged["Unidades_Facturadas"].fillna(0)
+
+    if "Referencia_Cruce_OC" in merged.columns and "Referencia_Cruce_FACT" in merged.columns:
+        merged["Referencia_Cruce"] = merged["Referencia_Cruce_OC"].fillna(merged["Referencia_Cruce_FACT"])
+    elif "Referencia_Cruce_OC" in merged.columns:
+        merged["Referencia_Cruce"] = merged["Referencia_Cruce_OC"]
+    elif "Referencia_Cruce_FACT" in merged.columns:
+        merged["Referencia_Cruce"] = merged["Referencia_Cruce_FACT"]
 
     merged["Fill_Rate_%"] = (
         merged["Unidades_Facturadas"] / merged["Unidades_Solicitadas"] * 100
@@ -493,6 +553,7 @@ def make_export_dataframe(df_result: pd.DataFrame) -> pd.DataFrame:
     """Prepara el DataFrame final que se enviara a Google Sheets."""
     export_cols = [
         "Numero_Orden",
+        "Referencia_Cruce",
         "Material_Ref",
         "Descripcion_OC",
         "Cajas_Solicitadas",
@@ -509,6 +570,7 @@ def make_export_dataframe(df_result: pd.DataFrame) -> pd.DataFrame:
     df_export.rename(
         columns={
             "Numero_Orden": "Número Orden",
+            "Referencia_Cruce": "Referencia Cliente",
             "Material_Ref": "Código Material",
             "Descripcion_OC": "Descripción",
             "Cajas_Solicitadas": "Cajas OC",
@@ -621,7 +683,7 @@ def main():
     df_result = compute_fill_rate(df_oc, df_fact)
 
     st.subheader("🧾 Validación de Órdenes")
-    st.caption("El análisis se cruza por número de orden y material. Solo se aceptan órdenes presentes en ambos lados.")
+    st.caption("El análisis se cruza por número de orden y referencia del cliente/material. Solo se aceptan órdenes presentes en ambos lados.")
     st.dataframe(
         pd.DataFrame(
             {
@@ -643,7 +705,7 @@ def main():
             Unidades_Facturadas=("Unidades_Facturadas", "sum"),
             Cajas_Solicitadas=("Cajas_Solicitadas", "sum"),
             Cajas_Facturadas_Estimadas=("Cajas_Facturadas_Estimadas", "sum"),
-            Ítems=("Material_Norm", "count"),
+            Ítems=("Referencia_Cruce_Norm", "count"),
         )
     )
     summary_by_order["Fill Rate %"] = (
@@ -695,6 +757,7 @@ def main():
     # Columnas visibles en el editor (reordenadas para legibilidad)
     cols_display = [
         "Numero_Orden",
+        "Referencia_Cruce",
         "Material_Ref",
         "Descripcion_OC",
         "Cajas_Solicitadas",
@@ -712,6 +775,9 @@ def main():
     column_config = {
         "Numero_Orden": st.column_config.TextColumn(
             "Número Orden", width="medium"
+        ),
+        "Referencia_Cruce": st.column_config.TextColumn(
+            "Referencia Cliente", width="medium"
         ),
         "Material_Ref": st.column_config.TextColumn(
             "Código Material", help="Referencia del proveedor", width="medium"
