@@ -1,1094 +1,642 @@
-# -*- coding: utf-8 -*-
 """
-🥛 NUTRI - Lácteos San Antonio C.A.
-Dashboard de Control de Inventario - Sistema de Gestión Logística
-Desarrollado por: GEM - Analítica de Datos Logísticos
+Dashboard de Control Logístico - Lácteos San Antonio C.A.
+Calcula el Fill Rate cruzando Órdenes de Compra con Facturación.
+
+Fuentes de datos soportadas:
+  - Facturación: XLSX o CSV con columnas 'Material' y 'Cantidad facturada'
+  - Orden de Compra: HTML (El Rosado, tabla #AutoNumber2) o
+                     XLS/XLSX (formato SMX con filas tipo '1','2','3')
 """
 
+import io
 import streamlit as st
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-import plotly.express as px
-import plotly.graph_objects as go
-from io import BytesIO
-import os
-import json
-import base64
+from bs4 import BeautifulSoup
+import requests
 
-# ============================================
-# CONFIGURACIÓN DE LA PÁGINA
-# ============================================
+# ──────────────────────────────────────────────────────────────────────────────
+# CONFIGURACIÓN DE PÁGINA
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="NUTRI - Control de Inventario",
+    page_title="Fill Rate Dashboard · Lácteos San Antonio",
     page_icon="🥛",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ============================================
-# COLORES NUTRI (Azul y Verde)
-# ============================================
-NUTRI_AZUL = "#0077B6"
-NUTRI_AZUL_CLARO = "#00B4D8"
-NUTRI_VERDE = "#7CB342"
-NUTRI_VERDE_CLARO = "#9CCC65"
+# Paleta de colores corporativa
+st.markdown(
+    """
+    <style>
+      [data-testid="stMetricValue"] { font-size: 2rem; font-weight: 700; }
+      .stDataFrame { border-radius: 8px; overflow: hidden; }
+      .block-container { padding-top: 1.5rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ============================================
-# ESTILOS CSS PERSONALIZADOS - TEMA NUTRI
-# ============================================
-st.markdown(f"""
-<style>
-    /* Header principal con colores Nutri */
-    .main-header {{
-        font-size: 2.2rem;
-        color: white;
-        text-align: center;
-        padding: 1.5rem;
-        background: linear-gradient(135deg, {NUTRI_AZUL} 0%, {NUTRI_AZUL_CLARO} 50%, {NUTRI_VERDE} 100%);
-        border-radius: 15px;
-        margin-bottom: 2rem;
-        box-shadow: 0 4px 15px rgba(0,119,182,0.3);
-    }}
-    
-    /* Cards de métricas */
-    .metric-card {{
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 5px solid {NUTRI_AZUL};
-    }}
-    
-    /* Estados con colores */
-    .status-libre {{ background-color: #C8E6C9; padding: 5px 10px; border-radius: 5px; }}
-    .status-retenida {{ background-color: #FFCDD2; padding: 5px 10px; border-radius: 5px; }}
-    .status-produccion {{ background-color: #FFF9C4; padding: 5px 10px; border-radius: 5px; }}
-    
-    /* Tabs personalizados */
-    .stTabs [data-baseweb="tab-list"] {{ 
-        gap: 8px; 
-        background-color: transparent;
-    }}
-    .stTabs [data-baseweb="tab"] {{
-        height: 50px;
-        padding: 10px 20px;
-        background: linear-gradient(180deg, {NUTRI_AZUL_CLARO}22 0%, {NUTRI_AZUL}22 100%);
-        border-radius: 10px 10px 0 0;
-        border: 2px solid {NUTRI_AZUL}44;
-    }}
-    .stTabs [data-baseweb="tab"]:hover {{
-        background: linear-gradient(180deg, {NUTRI_VERDE}33 0%, {NUTRI_AZUL}33 100%);
-    }}
-    
-    /* Métricas */
-    div[data-testid="stMetricValue"] {{ 
-        font-size: 1.8rem; 
-        color: {NUTRI_AZUL};
-    }}
-    
-    /* Botones primarios */
-    .stButton>button[kind="primary"] {{
-        background: linear-gradient(90deg, {NUTRI_AZUL} 0%, {NUTRI_VERDE} 100%);
-        border: none;
-    }}
-    
-    /* Sidebar con FONDO BLANCO y texto oscuro */
-    section[data-testid="stSidebar"] {{
-        background-color: #FFFFFF !important;
-        background-image: none !important;
-    }}
-    
-    section[data-testid="stSidebar"] > div {{
-        background-color: #FFFFFF !important;
-    }}
-    
-    section[data-testid="stSidebar"] .stMarkdown,
-    section[data-testid="stSidebar"] .stMarkdown p,
-    section[data-testid="stSidebar"] .stMarkdown span,
-    section[data-testid="stSidebar"] .stMarkdown li,
-    section[data-testid="stSidebar"] p, 
-    section[data-testid="stSidebar"] span,
-    section[data-testid="stSidebar"] li,
-    section[data-testid="stSidebar"] label {{
-        color: #333333 !important;
-    }}
-    
-    section[data-testid="stSidebar"] h1,
-    section[data-testid="stSidebar"] h2,
-    section[data-testid="stSidebar"] h3 {{
-        color: {NUTRI_AZUL} !important;
-    }}
-    
-    section[data-testid="stSidebar"] .stMetric label {{
-        color: #333333 !important;
-    }}
-    
-    section[data-testid="stSidebar"] [data-testid="stMetricValue"] {{
-        color: {NUTRI_AZUL} !important;
-    }}
-    
-    /* Sección info */
-    .seccion-info {{
-        background: linear-gradient(90deg, {NUTRI_AZUL}15 0%, {NUTRI_VERDE}15 100%);
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 4px solid {NUTRI_VERDE};
-        margin: 10px 0;
-    }}
-</style>
-""", unsafe_allow_html=True)
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ============================================
-# CATÁLOGO DE PRODUCTOS CON CÓDIGO SAP
-# ============================================
-PRODUCTOS_SAP = {
-    60000002: "LECHE SEMIDESCREMADA UHT POLIETILENO 1L",
-    60000026: "AVENA CON MARACUYA UHT TETRA SQUARE 1L",
-    60000027: "AVENA CON MARACUYA UHT SLIM 200ML",
-    60000028: "AVENA CON LECHE UHT SLIM 200ML",
-    60000029: "AVENA CON LECHE UHT TETRA SQUARE 1L",
-    60000030: "CREMA DE LECHE UHT TETRAFINO 1/2LT",
-    60000031: "CREMA DE LECHE UHT TETRAFINO 100ML",
-    60000032: "CREMA DE LECHE UHT POLIETILENO 200ML",
-    60000033: "CREMA DE LECHE UHT TETRAFINO 900ML",
-    60000035: "LECHE ENTERA UHT POLIETILENO 1L",
-    60000036: "LECHE ENTERA UHT SLIM 200ML",
-    60000037: "LECHE ENTERA UHT TETRAFINO 1/2 L",
-    60000038: "LECHE ENTERA UHT TETRAFINO 1L",
-    60000039: "LECHE SEMIDESCREMADA UHT TETRAFINO 1L",
-    60000041: "LECHE DESLACTOSADA UHT TETRA SQUARE 1L",
-    60000042: "LECHE DESLACTOSADA UHT TETRAFINO 1L",
-    60000043: "LECHE DESCREMADA UHT TETRA SQUARE 1L",
-    60000044: "LECHE ENTERA UHT TETRA SQUARE 1L",
-    60000045: "LECHE SEMIDESCREMADA UHT SQUARE 1L",
-    60000047: "LECHE SEMIDESCREMADA UHT TETRAFINO 1/2L",
-    60000048: "LECHE DESCREMADA UHT TETRAFINO 1L",
-    60000049: "LECHE ENTERA UHT TETRAFINO 900ML",
-    60000050: "LECHE SEMIDESCREMADA UHT TETRAFINO 900ML",
-    60000051: "LECHE DESCREMADA UHT TETRAFINO 900ML",
-    60000052: "LECHE DESLACTOSADA UHT TETRAFINO 900ML",
-    60000053: "LECHE ENTERA UHT TETRA SQUARE 500ML",
-    60000054: "LECHE SEMIDESCREMADA UHT SQUARE 500ML",
-    60000055: "LECHE DESCREMADA UHT TETRA SQUARE 500ML",
-    60000056: "LECHE DESLACTOSADA UHT SQUARE 500ML",
-    60000057: "LECHE ENTERA UHT POLIETILENO 900ML",
-    60000058: "LECHE SEMIDESCREMADA UHT POL 900ML",
-    60000113: "LECHE FRESA UHT SLIM 200ML",
-    60000114: "LECHE CHOCOLATE UHT LEAF 200 ML",
-    60000115: "LECHE ENTERA UHT POLIETILENO 200ML",
-    60000120: "4 PACK LECHE ENTERA UHT POLIETILENO 1L",
-    60000121: "4 PACK LECHE SEMI UHT POLIETILENO 1L",
-    60000122: "3 PACK LECHE DESLACTOSADA SQUARE 1L",
-    60000123: "3 PACK LECHE DESCREMADA SQUARE 1L",
-    60000124: "4 PACK LECHE ENTERA SQUARE 1L",
-    60000125: "4 PACK LECHE SEMIDESCREMADA SQUARE 1L",
-    60000130: "6 PACK AVENA CON LECHE SL 200ml",
-    60000131: "6 PACK LECHE SABORIZADA FRESA SQ 200ml",
-    60000132: "6 PACK LECHE SABOR CHOCOLATE SQ 200ml",
-    60000138: "LECHE CHOCOLATE NUTRI UHT SQUARE 1 LT",
-    60000172: "AVENA CON NARANJILLA UHT TETRA SQUARE 1L",
-    60000173: "AVENA CON NARANJILLA UHT SLIM 200ML",
-    60000180: "NUTRI NECTAR NARANJA UHT SQUARE 1L",
-    60000182: "NUTRI NECTAR DURAZNO UHT SQUARE 1L",
-    60000183: "NUTRI NECTAR NARANJA UHT SLIM 200ML",
-    60000184: "NUTRI NECTAR DURAZNO UHT SLIM 200ML",
-    60000185: "LECHE DESLACTOSADA UHT POL 900ML",
-    60000186: "6 PACK AVENA CON NARANJILLA SQ 200ML",
-    60000233: "CREMA DE LECHE SQUARE 1L",
-    60000296: "NUTRI AVENA CON MARACUYA UHT POLI 900 ML",
-    60000303: "4PACK LECHE UHT DESLACTOSADA POLI 900ML",
-    60000312: "LECHE ENTERA UHT POLIETILENO 400ML",
-    60000408: "5PACK LECHE ENTERA UHT POLI 900ML",
-    60000409: "5PACK LECHE SEMIDESCREMADA UHT POL 900ML",
-    60000410: "5PACK LECHE DESLACTOSADA UHT POL 900ML",
-    60000539: "NUTRI MEZCLA 3 LECHES UHT SQUARE 1L",
-    60000540: "NUTRI LECHE EVAPORADA UHT SQUARE 500ML",
-    60000569: "LECHE ENTERA EN POLVO FORTIFICADA 100 G",
-    60000570: "LECHE ENTERA EN POLVO FORTIFICADA 200G",
-    60000571: "LECHE ENTERA EN POLVO FORTIFICADA 400G",
-}
+def normalize_code(code: str) -> str:
+    """
+    Normaliza un código de material eliminando ceros a la izquierda
+    y espacios, para que '000000000060000310' y '60000310' sean iguales.
+    """
+    return str(code).strip().lstrip("0") or "0"
 
-# Lista para selectbox (código - descripción)
-PRODUCTOS_LISTA = [f"{codigo} - {desc}" for codigo, desc in sorted(PRODUCTOS_SAP.items(), key=lambda x: x[1])]
 
-ESTADOS = ["LIBRE UTILIZACIÓN", "RETENIDA", "PRODUCCIÓN", "NOVEDADES"]
-
-# Secciones de bodega (filas)
-SECCIONES_BODEGA = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
-FILAS_BODEGA = list(range(1, 21))  # Filas 1 a 20
-
-# Días de vida útil por tipo de producto
-VIDA_UTIL_DIAS = {
-    "AVENA": 180,
-    "LECHE ENTERA UHT": 180,
-    "LECHE SEMIDESCREMADA": 180,
-    "LECHE DESLACTOSADA": 180,
-    "LECHE DESCREMADA": 180,
-    "LECHE CHOCOLATE": 180,
-    "LECHE FRESA": 180,
-    "LECHE EN POLVO": 365,
-    "CREMA": 180,
-    "NECTAR": 180,
-    "PACK": 180,
-    "EVAPORADA": 365,
-    "3 LECHES": 365,
-    "DEFAULT": 180
-}
-
-# Título del sistema (sin logo externo por ahora)
-TITULO_SISTEMA = "🥛 NUTRI - Lácteos San Antonio C.A."
-
-# Archivo para persistencia de datos
-DATA_FILE = "inventario_lacteos.json"
-DATA_PATH = os.path.join(os.path.dirname(__file__), DATA_FILE)
-
-# ============================================
-# FUNCIONES DE UTILIDAD
-# ============================================
-def get_vida_util_dias(producto):
-    """Obtiene los días de vida útil según el tipo de producto"""
-    producto_upper = producto.upper()
-    for key, dias in VIDA_UTIL_DIAS.items():
-        if key in producto_upper:
-            return dias
-    return VIDA_UTIL_DIAS["DEFAULT"]
-
-def calcular_porcentaje_vida_util(fecha_elab, fecha_cad):
-    """Calcula el porcentaje de vida útil restante"""
+def to_float_safe(value, default: float = 0.0) -> float:
+    """Convierte un valor a float sin lanzar excepción."""
     try:
-        hoy = datetime.now().date()
-        
-        if isinstance(fecha_elab, str):
-            fecha_elab = datetime.strptime(fecha_elab, "%Y-%m-%d").date()
-        elif isinstance(fecha_elab, datetime):
-            fecha_elab = fecha_elab.date()
-            
-        if isinstance(fecha_cad, str):
-            fecha_cad = datetime.strptime(fecha_cad, "%Y-%m-%d").date()
-        elif isinstance(fecha_cad, datetime):
-            fecha_cad = fecha_cad.date()
-        
-        vida_total = (fecha_cad - fecha_elab).days
-        vida_restante = (fecha_cad - hoy).days
-        
-        if vida_total <= 0:
-            return 0
-        return max(0, min(100, (vida_restante / vida_total) * 100))
-    except:
-        return None
+        # Las celdas SMX usan coma como separador decimal en algunas versiones
+        return float(str(value).replace(",", ".").strip())
+    except (ValueError, TypeError):
+        return default
 
-def semaforo_vida_util(porcentaje):
-    """Retorna el emoji del semáforo según el porcentaje"""
-    if porcentaje is None:
-        return "⚪"
-    if porcentaje < 30:
-        return "🔴"
-    elif porcentaje < 50:
-        return "🟡"
-    else:
-        return "🟢"
 
-def color_vida_util_bg(val):
-    """Colorea las celdas según el porcentaje de vida útil"""
-    if pd.isna(val) or val is None:
-        return ''
-    if val < 30:
-        return 'background-color: #FFCDD2'
-    elif val < 50:
-        return 'background-color: #FFF9C4'
-    else:
-        return 'background-color: #C8E6C9'
+# ──────────────────────────────────────────────────────────────────────────────
+# ETL – ORDEN DE COMPRA HTML (Corporación El Rosado)
+# ──────────────────────────────────────────────────────────────────────────────
 
-def color_estado_bg(val):
-    """Colorea las celdas según el estado"""
-    colores = {
-        "LIBRE UTILIZACIÓN": 'background-color: #C8E6C9',
-        "RETENIDA": 'background-color: #FFCDD2',
-        "PRODUCCIÓN": 'background-color: #FFF9C4',
-        "NOVEDADES": 'background-color: #FFE0B2'
-    }
-    return colores.get(val, '')
+def parse_html_order(raw_bytes: bytes) -> pd.DataFrame:
+    """
+    Lee el HTML de Corporación El Rosado y extrae los ítems de la tabla
+    con id='AutoNumber2'.
 
-# ============================================
-# PERSISTENCIA DE DATOS
-# ============================================
-def guardar_datos():
-    """Guarda los datos en un archivo JSON"""
+    Columnas relevantes (índice 0-based dentro de la fila <tr>).
+    NOTA: BeautifulSoup NO expande colspan, por lo que cada celda con
+    colspan="3" sigue contando como índice 1. El orden real observado:
+      Col 0  → ITEN  (número de ítem, dígito para filtrar filas reales)
+      Col 1  → ARTICULO (código EAN largo del cliente)
+      Col 2  → DESCRIPCION (con colspan=3 en el HTML, pero índice único)
+      Col 3  → REFERENCIA (código del proveedor = Material SAP)
+      Col 4  → TAMAÑO
+      Col 5  → UXC  (unidades por caja)
+      Col 6  → CANTIDAD (cajas pedidas)
+      Col 7  → COSTO
+      Col 8  → DESCTO 1
+      Col 9  → DESCTO 2
+    """
+    soup = BeautifulSoup(raw_bytes, "html.parser")
+    tabla = soup.find("table", {"id": "AutoNumber2"})
+
+    if tabla is None:
+        raise ValueError(
+            "❌ No se encontró la tabla con id='AutoNumber2' en el HTML. "
+            "Verifica que estás subiendo la orden de Corporación El Rosado."
+        )
+
+    items = []
+    for fila in tabla.find_all("tr"):
+        celdas = fila.find_all(["td", "th"])
+
+        # Ignorar filas con menos columnas de las esperadas
+        if len(celdas) < 7:
+            continue
+
+        iten_text = celdas[0].get_text(strip=True).replace("\xa0", "")
+
+        # Solo procesar filas donde ITEN sea un número (ej. 10, 20, 30…)
+        if not iten_text.isdigit():
+            continue
+
+        try:
+            referencia    = celdas[3].get_text(strip=True).replace("\xa0", "")
+            descripcion   = celdas[2].get_text(strip=True)
+            uxc           = to_float_safe(celdas[5].get_text(strip=True).replace("\xa0", ""))
+            cant_cajas    = to_float_safe(celdas[6].get_text(strip=True).replace("\xa0", ""))
+
+            if uxc <= 0 or cant_cajas <= 0 or not referencia:
+                continue
+
+            items.append(
+                {
+                    "Material_Ref":          referencia,
+                    "Material_Norm":         normalize_code(referencia),
+                    "Descripcion_OC":        descripcion,
+                    "Cajas_Solicitadas":     cant_cajas,
+                    "UXC":                   uxc,
+                    "Unidades_Solicitadas":  uxc * cant_cajas,
+                }
+            )
+        except Exception:
+            continue  # Fila mal formada, se omite
+
+    if not items:
+        raise ValueError(
+            "❌ Se encontró la tabla, pero no contiene ítems válidos. "
+            "Revisa el formato del HTML."
+        )
+
+    return pd.DataFrame(items)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ETL – ORDEN DE COMPRA XLS/XLSX (Formato SMX)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def parse_smx_order(raw_bytes: bytes) -> pd.DataFrame:
+    """
+    Lee el archivo XLS/XLSX en formato SMX (Supermaxi/El Rosado).
+
+    Estructura de filas (columna 0 = tipo de registro):
+      'R' → encabezado de sección
+      '1' → cabecera del pedido (proveedor, fecha, etc.)
+      '2' → línea de ítem del pedido  ← las que nos interesan
+      '3' → totales del pedido
+
+    Columnas en filas tipo '2' (índice 0-based):
+      Col  2 → DESCRIPCION ARTICULO
+      Col  3 → CODIGO REFER  (referencia del proveedor = Material SAP)
+      Col  8 → UNMA          (unidades por caja / UXC)
+      Col 18 → CANTID        (cantidad de cajas pedidas)
+    """
     try:
-        datos = {
-            'inventario': st.session_state.inventario.to_dict('records'),
-            'ultimo_id': st.session_state.ultimo_id
-        }
-        with open(DATA_PATH, 'w', encoding='utf-8') as f:
-            json.dump(datos, f, ensure_ascii=False, indent=2, default=str)
+        df_raw = pd.read_excel(io.BytesIO(raw_bytes), header=None, dtype=str)
     except Exception as e:
-        st.error(f"Error al guardar: {e}")
+        raise ValueError(f"❌ No se pudo leer el archivo Excel: {e}")
 
-def cargar_datos():
-    """Carga los datos desde el archivo JSON"""
+    # Filtrar filas de ítem (tipo '2')
+    mask_items = df_raw.iloc[:, 0].astype(str).str.strip() == "2"
+    item_rows = df_raw[mask_items]
+
+    if item_rows.empty:
+        raise ValueError(
+            "❌ No se encontraron filas de tipo '2' en el archivo SMX. "
+            "Verifica que estás subiendo la orden de compra correcta."
+        )
+
+    items = []
+    for _, fila in item_rows.iterrows():
+        try:
+            referencia   = str(fila.iloc[3]).strip()
+            descripcion  = str(fila.iloc[2]).strip()
+            # UNMA viene como '0012' → 12 ; '0008' → 8
+            uxc          = to_float_safe(str(fila.iloc[8]).lstrip("0") or "1")
+            cant_cajas   = to_float_safe(str(fila.iloc[18]).lstrip("0") or "0")
+
+            if not referencia or referencia in ("nan", "None"):
+                continue
+            if uxc <= 0:
+                uxc = 1  # Salvaguarda
+
+            items.append(
+                {
+                    "Material_Ref":          referencia,
+                    "Material_Norm":         normalize_code(referencia),
+                    "Descripcion_OC":        descripcion,
+                    "Cajas_Solicitadas":     cant_cajas,
+                    "UXC":                   uxc,
+                    "Unidades_Solicitadas":  uxc * cant_cajas,
+                }
+            )
+        except Exception:
+            continue
+
+    if not items:
+        raise ValueError("❌ No se pudieron extraer ítems válidos del archivo SMX.")
+
+    return pd.DataFrame(items)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ETL – FACTURACIÓN (XLSX / CSV)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def parse_billing(raw_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Carga el reporte de facturación y lo agrupa por código de material.
+
+    Columnas requeridas: 'Material', 'Cantidad facturada'
+    Columna opcional:    'Descripcion'
+    """
     try:
-        if os.path.exists(DATA_PATH):
-            with open(DATA_PATH, 'r', encoding='utf-8') as f:
-                datos = json.load(f)
-                return pd.DataFrame(datos['inventario']), datos['ultimo_id']
-    except Exception as e:
-        st.warning(f"No se pudieron cargar datos previos: {e}")
-    return None, 0
-
-def inicializar_datos():
-    """Inicializa el DataFrame en session_state"""
-    if 'inventario' not in st.session_state:
-        df_cargado, ultimo_id = cargar_datos()
-        if df_cargado is not None and not df_cargado.empty:
-            st.session_state.inventario = df_cargado
-            st.session_state.ultimo_id = ultimo_id
+        if filename.lower().endswith(".csv"):
+            # Intentar UTF-8, luego latin-1 como fallback
+            try:
+                df = pd.read_csv(io.BytesIO(raw_bytes), dtype=str)
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.BytesIO(raw_bytes), dtype=str, encoding="latin-1")
         else:
-            st.session_state.inventario = pd.DataFrame(columns=[
-                'ID', 'FECHA_REGISTRO', 'ESTADO', 'SECCION', 'FILA', 'CODIGO_SAP', 
-                'DESCRIPCION', 'LOTE', 'FECHA_ELABORACION', 'FECHA_CADUCIDAD', 
-                'PALLETS', 'CAJAS', 'UNIDADES', 'OBSERVACIONES', 'VIDA_UTIL_%', 'SEMAFORO'
-            ])
-            st.session_state.ultimo_id = 0
+            df = pd.read_excel(io.BytesIO(raw_bytes), dtype=str)
+    except Exception as e:
+        raise ValueError(f"❌ No se pudo leer el archivo de facturación: {e}")
 
-def agregar_registro(estado, seccion, fila, codigo_sap, descripcion, lote, fecha_elab, fecha_cad, pallets, cajas, unidades, observaciones):
-    """Agrega un nuevo registro al inventario"""
-    st.session_state.ultimo_id += 1
-    
-    vida_util = calcular_porcentaje_vida_util(fecha_elab, fecha_cad)
-    semaforo = semaforo_vida_util(vida_util)
-    
-    nuevo_registro = pd.DataFrame([{
-        'ID': st.session_state.ultimo_id,
-        'FECHA_REGISTRO': datetime.now().strftime("%Y-%m-%d %H:%M"),
-        'ESTADO': estado,
-        'SECCION': seccion,
-        'FILA': fila,
-        'CODIGO_SAP': codigo_sap,
-        'DESCRIPCION': descripcion,
-        'LOTE': lote,
-        'FECHA_ELABORACION': str(fecha_elab),
-        'FECHA_CADUCIDAD': str(fecha_cad),
-        'PALLETS': pallets,
-        'CAJAS': cajas,
-        'UNIDADES': unidades,
-        'OBSERVACIONES': observaciones,
-        'VIDA_UTIL_%': vida_util,
-        'SEMAFORO': semaforo
-    }])
-    
-    st.session_state.inventario = pd.concat([st.session_state.inventario, nuevo_registro], ignore_index=True)
-    guardar_datos()
+    # Verificar columnas requeridas
+    required = {"Material", "Cantidad facturada"}
+    missing  = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"❌ El archivo de facturación no contiene las columnas: {missing}. "
+            f"Columnas encontradas: {list(df.columns)}"
+        )
 
-def eliminar_registro(id_registro):
-    """Elimina un registro del inventario"""
-    st.session_state.inventario = st.session_state.inventario[
-        st.session_state.inventario['ID'] != id_registro
-    ]
-    guardar_datos()
-
-def exportar_excel():
-    """Exporta los datos a un archivo Excel con formato según estructura CONTEO"""
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-    from openpyxl.utils.dataframe import dataframe_to_rows
-    
-    output = BytesIO()
-    
-    # Colores para cada sección
-    COLOR_LIBRE = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Verde claro
-    COLOR_LIBRE_HEADER = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Amarillo
-    COLOR_RETENIDA = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")  # Rojo
-    COLOR_PRODUCCION = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")  # Azul claro
-    COLOR_NOVEDADES = PatternFill(start_color="DDA0DD", end_color="DDA0DD", fill_type="solid")  # Morado
-    
-    header_font = Font(bold=True, size=10)
-    border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
+    # Convertir cantidad a numérico
+    df["Cantidad facturada"] = df["Cantidad facturada"].apply(
+        lambda x: to_float_safe(str(x).replace(",", "."))
     )
-    
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Columnas del reporte según estructura CONTEO
-        columnas_reporte = [
-            'SECCION', 'FILA', 'CODIGO_SAP', 'DESCRIPCION', 'LOTE', 
-            'PALLETS', 'CAJAS', 'UNIDADES', 'FECHA_ELABORACION', 
-            'FECHA_CADUCIDAD', 'VIDA_UTIL_%', 'SEMAFORO', 'OBSERVACIONES'
-        ]
-        
-        # Verificar qué columnas existen
-        columnas_existentes = [c for c in columnas_reporte if c in st.session_state.inventario.columns]
-        
-        # ========== HOJA: LIBRE UTILIZACIÓN ==========
-        df_libre = st.session_state.inventario[
-            st.session_state.inventario['ESTADO'] == 'LIBRE UTILIZACIÓN'
-        ][columnas_existentes].copy() if not st.session_state.inventario.empty else pd.DataFrame(columns=columnas_existentes)
-        
-        df_libre.to_excel(writer, sheet_name='LIBRE_UTILIZACION', index=False, startrow=1)
-        ws_libre = writer.sheets['LIBRE_UTILIZACION']
-        ws_libre.merge_cells('A1:M1')
-        ws_libre['A1'] = 'LIBRE UTILIZACIÓN'
-        ws_libre['A1'].fill = COLOR_LIBRE
-        ws_libre['A1'].font = Font(bold=True, size=14)
-        ws_libre['A1'].alignment = Alignment(horizontal='center')
-        
-        # Aplicar colores a encabezados
-        for col in range(1, len(columnas_existentes) + 1):
-            cell = ws_libre.cell(row=2, column=col)
-            cell.fill = COLOR_LIBRE_HEADER
-            cell.font = header_font
-            cell.border = border
-        
-        # ========== HOJA: RETENIDA ==========
-        df_retenida = st.session_state.inventario[
-            st.session_state.inventario['ESTADO'] == 'RETENIDA'
-        ][columnas_existentes].copy() if not st.session_state.inventario.empty else pd.DataFrame(columns=columnas_existentes)
-        
-        df_retenida.to_excel(writer, sheet_name='RETENIDA', index=False, startrow=1)
-        ws_retenida = writer.sheets['RETENIDA']
-        ws_retenida.merge_cells('A1:M1')
-        ws_retenida['A1'] = 'RETENIDA POR FALTA DE LIBERACIÓN'
-        ws_retenida['A1'].fill = COLOR_RETENIDA
-        ws_retenida['A1'].font = Font(bold=True, size=14, color='FFFFFF')
-        ws_retenida['A1'].alignment = Alignment(horizontal='center')
-        
-        for col in range(1, len(columnas_existentes) + 1):
-            cell = ws_retenida.cell(row=2, column=col)
-            cell.fill = COLOR_RETENIDA
-            cell.font = Font(bold=True, color='FFFFFF')
-            cell.border = border
-        
-        # ========== HOJA: PRODUCCIÓN ==========
-        df_produccion = st.session_state.inventario[
-            st.session_state.inventario['ESTADO'] == 'PRODUCCIÓN'
-        ][columnas_existentes].copy() if not st.session_state.inventario.empty else pd.DataFrame(columns=columnas_existentes)
-        
-        df_produccion.to_excel(writer, sheet_name='PRODUCCION', index=False, startrow=1)
-        ws_produccion = writer.sheets['PRODUCCION']
-        ws_produccion.merge_cells('A1:M1')
-        ws_produccion['A1'] = 'PRODUCCIÓN'
-        ws_produccion['A1'].fill = COLOR_PRODUCCION
-        ws_produccion['A1'].font = Font(bold=True, size=14)
-        ws_produccion['A1'].alignment = Alignment(horizontal='center')
-        
-        for col in range(1, len(columnas_existentes) + 1):
-            cell = ws_produccion.cell(row=2, column=col)
-            cell.fill = COLOR_PRODUCCION
-            cell.font = header_font
-            cell.border = border
-        
-        # ========== HOJA: NOVEDADES ==========
-        df_novedades = st.session_state.inventario[
-            st.session_state.inventario['ESTADO'] == 'NOVEDADES'
-        ][columnas_existentes].copy() if not st.session_state.inventario.empty else pd.DataFrame(columns=columnas_existentes)
-        
-        if not df_novedades.empty or True:  # Siempre crear la hoja
-            df_novedades.to_excel(writer, sheet_name='NOVEDADES', index=False, startrow=1)
-            ws_novedades = writer.sheets['NOVEDADES']
-            ws_novedades.merge_cells('A1:M1')
-            ws_novedades['A1'] = 'NOVEDADES'
-            ws_novedades['A1'].fill = COLOR_NOVEDADES
-            ws_novedades['A1'].font = Font(bold=True, size=14)
-            ws_novedades['A1'].alignment = Alignment(horizontal='center')
-            
-            for col in range(1, len(columnas_existentes) + 1):
-                cell = ws_novedades.cell(row=2, column=col)
-                cell.fill = COLOR_NOVEDADES
-                cell.font = header_font
-                cell.border = border
-        
-        # ========== HOJA: RESUMEN EJECUTIVO ==========
-        if not st.session_state.inventario.empty:
-            resumen_data = []
-            for estado in ESTADOS:
-                df_est = st.session_state.inventario[st.session_state.inventario['ESTADO'] == estado]
-                resumen_data.append({
-                    'ESTADO': estado,
-                    'TOTAL_REGISTROS': len(df_est),
-                    'TOTAL_PALLETS': df_est['PALLETS'].sum() if not df_est.empty else 0,
-                    'TOTAL_CAJAS': df_est['CAJAS'].sum() if not df_est.empty else 0,
-                    'TOTAL_UNIDADES': df_est['UNIDADES'].sum() if not df_est.empty else 0
-                })
-            
-            df_resumen = pd.DataFrame(resumen_data)
-            df_resumen.to_excel(writer, sheet_name='RESUMEN', index=False)
-            
-            ws_resumen = writer.sheets['RESUMEN']
-            for col in range(1, 6):
-                cell = ws_resumen.cell(row=1, column=col)
-                cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-                cell.font = Font(bold=True, color='FFFFFF')
-                cell.border = border
-    
-    return output.getvalue()
 
-# ============================================
-# INICIALIZAR DATOS
-# ============================================
-inicializar_datos()
+    # Normalizar código de material
+    df["Material_Norm"] = df["Material"].apply(normalize_code)
 
-# ============================================
-# INTERFAZ PRINCIPAL
-# ============================================
-st.markdown('<div class="main-header">🥛 NUTRI - Sistema de Control de Inventario<br><small>Lácteos San Antonio C.A.</small></div>', unsafe_allow_html=True)
+    # Agregar descripción si existe
+    agg_dict = {"Cantidad facturada": "sum"}
+    if "Descripcion" in df.columns:
+        agg_dict["Descripcion"] = "first"
 
-# ============================================
-# PESTAÑAS PRINCIPALES
-# ============================================
-tab1, tab2, tab3, tab4 = st.tabs(["📝 Ingreso de Datos", "📋 Inventario", "📊 Gráficos", "📥 Reportes"])
+    grouped = df.groupby("Material_Norm").agg(agg_dict).reset_index()
+    grouped.rename(columns={"Cantidad facturada": "Unidades_Facturadas"}, inplace=True)
 
-# ============================================
-# TAB 1: INGRESO DE DATOS
-# ============================================
-with tab1:
-    st.header("📝 Registro de Nuevo Lote")
-    
-    with st.form("formulario_ingreso", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📦 Información del Producto")
-            
-            # Estado
-            estado = st.selectbox(
-                "🏷️ Estado / Sección",
-                ESTADOS,
-                help="Estado actual del producto en bodega"
-            )
-            
-            # Ubicación en bodega
-            st.markdown("**📍 Ubicación en Bodega:**")
-            col_ub1, col_ub2 = st.columns(2)
-            with col_ub1:
-                seccion = st.selectbox("Sección", SECCIONES_BODEGA, help="Sección de la bodega (A-J)")
-            with col_ub2:
-                fila = st.selectbox("Fila", FILAS_BODEGA, help="Número de fila (1-20)")
-            
-            st.markdown("---")
-            
-            # Selección de producto por código SAP o descripción
-            st.markdown("**🔍 Buscar Producto:**")
-            metodo_busqueda = st.radio(
-                "Buscar por:",
-                ["📋 Descripción", "🔢 Código SAP"],
-                horizontal=True,
-                label_visibility="collapsed"
-            )
-            
-            if metodo_busqueda == "🔢 Código SAP":
-                codigo_ingresado = st.number_input(
-                    "Código SAP",
-                    min_value=60000000,
-                    max_value=69999999,
-                    value=60000035,
-                    step=1,
-                    help="Ingresa el código SAP del producto"
-                )
-                if codigo_ingresado in PRODUCTOS_SAP:
-                    descripcion = PRODUCTOS_SAP[codigo_ingresado]
-                    codigo_sap = codigo_ingresado
-                    st.success(f"✅ {descripcion}")
-                else:
-                    descripcion = ""
-                    codigo_sap = codigo_ingresado
-                    st.warning("⚠️ Código no encontrado en catálogo")
+    if "Descripcion" in grouped.columns:
+        grouped.rename(columns={"Descripcion": "Descripcion_Fact"}, inplace=True)
+
+    return grouped
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CRUCE Y CÁLCULO DE FILL RATE
+# ──────────────────────────────────────────────────────────────────────────────
+
+MOTIVOS = [
+    "",
+    "Quiebre de Stock",
+    "Producción Insuficiente",
+    "Avería en Transporte",
+    "Error en Picking",
+    "Rechazo de Calidad",
+    "Problema de Temperatura",
+    "Retraso del Proveedor",
+    "Diferencia de Precio / Condición",
+    "Pedido Fuera de Ventana Horaria",
+    "Otro",
+]
+
+
+def compute_fill_rate(df_oc: pd.DataFrame, df_fact: pd.DataFrame) -> pd.DataFrame:
+    """
+    Une la orden de compra con la facturación y calcula:
+      - Unidades_Facturadas  (0 si no hay match)
+      - Fill_Rate_%          (facturado / solicitado × 100, tope 100 %)
+      - Brecha_Unidades      (solicitado – facturado, mínimo 0)
+    """
+    merged = df_oc.merge(df_fact, on="Material_Norm", how="left")
+    merged["Unidades_Facturadas"] = merged["Unidades_Facturadas"].fillna(0)
+
+    merged["Fill_Rate_%"] = (
+        merged["Unidades_Facturadas"] / merged["Unidades_Solicitadas"] * 100
+    ).round(2).clip(upper=100.0)
+
+    merged["Brecha_Unidades"] = (
+        merged["Unidades_Solicitadas"] - merged["Unidades_Facturadas"]
+    ).clip(lower=0)
+
+    # Cumplimiento a nivel de orden de compra (cajas)
+    merged["Cajas_Facturadas_Estimadas"] = (
+        merged["Unidades_Facturadas"] / merged["UXC"].replace(0, pd.NA)
+    ).fillna(0)
+    merged["Cumplimiento_OC_%"] = (
+        merged["Cajas_Facturadas_Estimadas"] / merged["Cajas_Solicitadas"].replace(0, pd.NA) * 100
+    ).round(2).fillna(0).clip(upper=100.0)
+
+    # Columnas editables vacías
+    merged["Motivo de Falta"]    = ""
+    merged["Acción Correctiva"]  = ""
+
+    return merged
+
+
+def highlight_fill_rate(val):
+    """Color para la columna Fill Rate en la tabla de resumen."""
+    if pd.isna(val):
+        return ""
+    if val < 70:
+        return "color: #c0392b; font-weight: bold"
+    if val < 95:
+        return "color: #e67e22; font-weight: bold"
+    return "color: #27ae60; font-weight: bold"
+
+
+def upload_to_apps_script(
+    df_export: pd.DataFrame,
+    webapp_url: str,
+    token: str,
+    worksheet_name: str,
+) -> None:
+    """Sube el DataFrame a Google Sheets via Apps Script Web App."""
+    rows = [df_export.columns.tolist()] + df_export.fillna("").astype(str).values.tolist()
+
+    payload = {
+        "token": token,
+        "sheet_name": worksheet_name,
+        "rows": rows,
+    }
+
+    response = requests.post(webapp_url, json=payload, timeout=60)
+    response.raise_for_status()
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise ValueError(f"Respuesta no valida del Apps Script: {response.text}")
+
+    if not data.get("ok"):
+        raise ValueError(data.get("error", "Error desconocido al subir a Apps Script."))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# INTERFAZ STREAMLIT
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main():
+    # ── Encabezado ──────────────────────────────────────────────────────────
+    st.title("🥛 Dashboard de Control Logístico")
+    st.markdown(
+        "**Lácteos San Antonio C.A.** · Análisis de Nivel de Servicio (Fill Rate)"
+    )
+    st.divider()
+
+    # ── Sidebar – carga de archivos ─────────────────────────────────────────
+    with st.sidebar:
+        st.header("📂 Cargar Archivos")
+        st.caption("Sube los dos archivos para activar el análisis.")
+
+        archivo_fact = st.file_uploader(
+            "1️⃣  Reporte de Facturación",
+            type=["xlsx", "xls", "csv"],
+            help="Debe contener las columnas 'Material' y 'Cantidad facturada'.",
+        )
+
+        archivo_oc = st.file_uploader(
+            "2️⃣  Orden de Compra",
+            type=["html", "htm", "xlsx", "xls"],
+            help=(
+                "Acepta:\n"
+                "• HTML de Corporación El Rosado (tabla #AutoNumber2)\n"
+                "• Excel SMX (filas tipo 1 / 2 / 3)"
+            ),
+        )
+
+        st.divider()
+        st.markdown(
+            "**Semáforo Fill Rate**\n\n"
+            "🟢 ≥ 95 %  Óptimo\n\n"
+            "🟡 70–94 %  Alerta\n\n"
+            "🔴 < 70 %  Crítico"
+        )
+
+    # ── Procesamiento ────────────────────────────────────────────────────────
+    if archivo_fact is None or archivo_oc is None:
+        st.info(
+            "👈 Por favor, sube el **Reporte de Facturación** y la "
+            "**Orden de Compra** en el panel lateral para comenzar."
+        )
+        st.stop()
+
+    # Leer y parsear facturación
+    with st.spinner("Procesando facturación…"):
+        try:
+            df_fact = parse_billing(archivo_fact.read(), archivo_fact.name)
+        except ValueError as e:
+            st.error(str(e))
+            st.stop()
+
+    # Leer y parsear orden de compra
+    with st.spinner("Procesando orden de compra…"):
+        raw_oc = archivo_oc.read()
+        try:
+            if archivo_oc.name.lower().endswith((".html", ".htm")):
+                df_oc = parse_html_order(raw_oc)
             else:
-                producto_seleccionado = st.selectbox(
-                    "Producto",
-                    PRODUCTOS_LISTA,
-                    help="Selecciona el producto del catálogo"
-                )
-                # Extraer código y descripción
-                codigo_sap = int(producto_seleccionado.split(" - ")[0])
-                descripcion = producto_seleccionado.split(" - ")[1]
-            
-            # Mostrar código SAP seleccionado
-            st.markdown(f'<div class="seccion-info">🏷️ <b>Código SAP:</b> {codigo_sap}<br>📦 <b>Producto:</b> {descripcion}</div>', unsafe_allow_html=True)
-            
-            # Lote
-            lote = st.text_input(
-                "🔢 Número de Lote",
-                placeholder="Ej: L5331, L5323C"
-            )
-            
-            observaciones = st.text_area(
-                "📝 Observaciones",
-                placeholder="Notas adicionales...",
-                height=80
-            )
-        
-        with col2:
-            st.subheader("📅 Fechas y Cantidades")
-            
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                fecha_elaboracion = st.date_input(
-                    "📅 Fecha Elaboración",
-                    value=datetime.now().date()
-                )
-            
-            with col_f2:
-                dias_vida = get_vida_util_dias(descripcion if descripcion else "DEFAULT")
-                fecha_cad_sugerida = fecha_elaboracion + timedelta(days=dias_vida)
-                fecha_caducidad = st.date_input(
-                    "📅 Fecha Caducidad",
-                    value=fecha_cad_sugerida
-                )
-            
-            # Preview de vida útil
-            vida_util_preview = calcular_porcentaje_vida_util(fecha_elaboracion, fecha_caducidad)
-            semaforo_preview = semaforo_vida_util(vida_util_preview)
-            
-            if vida_util_preview is not None:
-                if vida_util_preview >= 50:
-                    st.success(f"{semaforo_preview} Vida útil: **{vida_util_preview:.1f}%** - Óptimo")
-                elif vida_util_preview >= 30:
-                    st.warning(f"{semaforo_preview} Vida útil: **{vida_util_preview:.1f}%** - Alerta")
-                else:
-                    st.error(f"{semaforo_preview} Vida útil: **{vida_util_preview:.1f}%** - Crítico")
-            
-            st.markdown("---")
-            st.markdown("**📦 Cantidades:**")
-            col_c1, col_c2, col_c3 = st.columns(3)
-            
-            with col_c1:
-                pallets = st.number_input("🎯 Pallets", min_value=0, value=0, step=1)
-            with col_c2:
-                cajas = st.number_input("📦 Cajas", min_value=0, value=0, step=1)
-            with col_c3:
-                unidades = st.number_input("🔢 Unidades", min_value=0, value=0, step=1)
-            
-            # Resumen visual
-            st.markdown("---")
-            st.markdown("**📋 Resumen del Registro:**")
-            st.markdown(f"""
-            | Campo | Valor |
-            |-------|-------|
-            | **Ubicación** | Sección {seccion} - Fila {fila} |
-            | **Código SAP** | {codigo_sap} |
-            | **Producto** | {descripcion[:40]}... |
-            | **Estado** | {estado} |
-            """)
-        
-        # Botón de envío
-        submitted = st.form_submit_button("✅ REGISTRAR PRODUCTO", type="primary", use_container_width=True)
-        
-        if submitted:
-            if descripcion and lote:
-                agregar_registro(
-                    estado, seccion, fila, codigo_sap, descripcion, lote, 
-                    fecha_elaboracion, fecha_caducidad, pallets, cajas, unidades, observaciones
-                )
-                st.success(f"✅ Lote **{lote}** - {descripcion} registrado en Sección {seccion}-{fila}!")
-                st.balloons()
-            else:
-                st.error("⚠️ Completa al menos el Producto y el Lote")
+                df_oc = parse_smx_order(raw_oc)
+        except ValueError as e:
+            st.error(str(e))
+            st.stop()
 
-# ============================================
-# TAB 2: INVENTARIO ACTUAL
-# ============================================
-with tab2:
-    st.header("📋 Inventario Actual")
-    
-    if st.session_state.inventario.empty:
-        st.info("📭 No hay registros. Ve a **Ingreso de Datos** para agregar productos.")
-    else:
-        # Filtros en una fila
-        st.subheader("🔍 Filtros")
-        col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
-        
-        with col_f1:
-            filtro_estado = st.multiselect(
-                "Estado",
-                options=ESTADOS,
-                default=st.session_state.inventario['ESTADO'].unique().tolist() if 'ESTADO' in st.session_state.inventario.columns else []
-            )
-        
-        with col_f2:
-            # Filtro por sección
-            secciones_disponibles = st.session_state.inventario['SECCION'].unique().tolist() if 'SECCION' in st.session_state.inventario.columns else SECCIONES_BODEGA
-            filtro_seccion = st.multiselect(
-                "Sección",
-                options=secciones_disponibles,
-                default=secciones_disponibles
-            )
-        
-        with col_f3:
-            productos_unicos = st.session_state.inventario['DESCRIPCION'].unique().tolist() if 'DESCRIPCION' in st.session_state.inventario.columns else []
-            filtro_producto = st.multiselect(
-                "Producto",
-                options=productos_unicos,
-                default=productos_unicos[:10] if len(productos_unicos) > 10 else productos_unicos
-            )
-        
-        with col_f4:
-            filtro_semaforo = st.multiselect(
-                "Vida Útil",
-                options=["🔴 Crítico", "🟡 Alerta", "🟢 Óptimo"],
-                default=["🔴 Crítico", "🟡 Alerta", "🟢 Óptimo"]
-            )
-        
-        with col_f5:
-            buscar_lote = st.text_input("🔎 Buscar Lote/SAP", "")
-        
-        # Aplicar filtros
-        df_filtrado = st.session_state.inventario.copy()
-        
-        if filtro_estado and 'ESTADO' in df_filtrado.columns:
-            df_filtrado = df_filtrado[df_filtrado['ESTADO'].isin(filtro_estado)]
-        if filtro_seccion and 'SECCION' in df_filtrado.columns:
-            df_filtrado = df_filtrado[df_filtrado['SECCION'].isin(filtro_seccion)]
-        if filtro_producto and 'DESCRIPCION' in df_filtrado.columns:
-            df_filtrado = df_filtrado[df_filtrado['DESCRIPCION'].isin(filtro_producto)]
-        if buscar_lote:
-            mask = df_filtrado['LOTE'].astype(str).str.contains(buscar_lote, case=False, na=False)
-            if 'CODIGO_SAP' in df_filtrado.columns:
-                mask = mask | df_filtrado['CODIGO_SAP'].astype(str).str.contains(buscar_lote, case=False, na=False)
-            df_filtrado = df_filtrado[mask]
-        
-        # Filtro semáforo
-        def filtrar_semaforo(row):
-            vida = row.get('VIDA_UTIL_%')
-            if pd.isna(vida) or vida is None:
-                return True
-            if vida < 30 and "🔴 Crítico" in filtro_semaforo:
-                return True
-            if 30 <= vida < 50 and "🟡 Alerta" in filtro_semaforo:
-                return True
-            if vida >= 50 and "🟢 Óptimo" in filtro_semaforo:
-                return True
-            return False
-        
-        if filtro_semaforo:
-            df_filtrado = df_filtrado[df_filtrado.apply(filtrar_semaforo, axis=1)]
-        
-        # KPIs
-        st.markdown("---")
-        col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
-        
-        with col_m1:
-            st.metric("📦 Cajas", f"{df_filtrado['CAJAS'].sum():,.0f}")
-        with col_m2:
-            st.metric("🎯 Pallets", f"{df_filtrado['PALLETS'].sum():,.0f}")
-        with col_m3:
-            st.metric("🔢 Unidades", f"{df_filtrado['UNIDADES'].sum():,.0f}")
-        with col_m4:
-            st.metric("📝 Registros", len(df_filtrado))
-        with col_m5:
-            criticos = len(df_filtrado[df_filtrado['VIDA_UTIL_%'] < 30]) if 'VIDA_UTIL_%' in df_filtrado.columns else 0
-            st.metric("🔴 Críticos", criticos)
-        with col_m6:
-            secciones_ocupadas = df_filtrado['SECCION'].nunique() if 'SECCION' in df_filtrado.columns else 0
-            st.metric("📍 Secciones", secciones_ocupadas)
-        
-        # Tabla de datos
-        st.markdown("---")
-        
-        # Seleccionar columnas a mostrar (incluyendo nuevas)
-        columnas_mostrar = ['ID', 'SECCION', 'FILA', 'ESTADO', 'CODIGO_SAP', 'DESCRIPCION', 'LOTE', 
-                           'FECHA_ELABORACION', 'FECHA_CADUCIDAD', 'PALLETS', 'CAJAS', 
-                           'UNIDADES', 'VIDA_UTIL_%', 'SEMAFORO']
-        
-        df_mostrar = df_filtrado[[c for c in columnas_mostrar if c in df_filtrado.columns]].copy()
-        
-        # Formatear y mostrar
-        st.dataframe(
-            df_mostrar.style.map(color_vida_util_bg, subset=['VIDA_UTIL_%'] if 'VIDA_UTIL_%' in df_mostrar.columns else [])
-                          .map(color_estado_bg, subset=['ESTADO'] if 'ESTADO' in df_mostrar.columns else [])
-                          .format({'VIDA_UTIL_%': '{:.1f}%'} if 'VIDA_UTIL_%' in df_mostrar.columns else {}),
-            use_container_width=True,
-            height=400
-        )
-        
-        # Eliminar registro
-        st.markdown("---")
-        with st.expander("🗑️ Eliminar Registro"):
-            if not df_filtrado.empty:
-                opciones_eliminar = df_filtrado.apply(
-                    lambda r: f"ID {r['ID']} - Sec:{r.get('SECCION', 'N/A')}-{r.get('FILA', 'N/A')} - {r.get('DESCRIPCION', 'N/A')[:30]} - Lote: {r['LOTE']}", axis=1
-                ).tolist()
-                
-                seleccion = st.selectbox("Selecciona registro a eliminar:", opciones_eliminar)
-                
-                if seleccion:
-                    id_seleccionado = int(seleccion.split(" - ")[0].replace("ID ", ""))
-                    
-                    col_del1, col_del2 = st.columns([1, 4])
-                    with col_del1:
-                        if st.button("🗑️ Eliminar", type="secondary"):
-                            eliminar_registro(id_seleccionado)
-                            st.warning(f"Registro eliminado")
-                            st.rerun()
+    # Cruce y Fill Rate
+    df_result = compute_fill_rate(df_oc, df_fact)
 
-# ============================================
-# TAB 3: GRÁFICOS Y ANÁLISIS
-# ============================================
-with tab3:
-    st.header("📊 Análisis Visual")
-    
-    if st.session_state.inventario.empty:
-        st.info("📭 No hay datos para graficar. Agrega registros primero.")
-    else:
-        df = st.session_state.inventario.copy()
-        
-        # Fila 1: Distribución por Estado y Producto
-        col_g1, col_g2 = st.columns(2)
-        
-        with col_g1:
-            st.subheader("📊 Distribución por Estado")
-            df_estado = df.groupby('ESTADO')['CAJAS'].sum().reset_index()
-            
-            fig_pie = px.pie(
-                df_estado,
-                values='CAJAS',
-                names='ESTADO',
-                color='ESTADO',
-                color_discrete_map={
-                    'LIBRE UTILIZACIÓN': NUTRI_VERDE,
-                    'RETENIDA': '#F44336',
-                    'PRODUCCIÓN': '#FFC107',
-                    'NOVEDADES': '#FF9800'
-                },
-                hole=0.4
-            )
-            fig_pie.update_layout(height=350, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_pie, use_container_width=True)
-        
-        with col_g2:
-            st.subheader("📦 Top Productos por Cajas")
-            df_producto = df.groupby('DESCRIPCION')['CAJAS'].sum().reset_index()
-            df_producto = df_producto.sort_values('CAJAS', ascending=True).tail(10)
-            
-            fig_bar = px.bar(
-                df_producto,
-                x='CAJAS',
-                y='DESCRIPCION',
-                orientation='h',
-                color='CAJAS',
-                color_continuous_scale=[[0, NUTRI_AZUL_CLARO], [1, NUTRI_AZUL]]
-            )
-            fig_bar.update_layout(height=350, showlegend=False, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_bar, use_container_width=True)
-        
-        # Inventario por Sección
-        st.markdown("---")
-        st.subheader("📍 Inventario por Sección de Bodega")
-        
-        if 'SECCION' in df.columns and df['SECCION'].notna().any():
-            df_seccion = df.groupby('SECCION').agg({
-                'CAJAS': 'sum',
-                'PALLETS': 'sum',
-                'ID': 'count'
-            }).rename(columns={'ID': 'LOTES'}).reset_index()
-            
-            fig_seccion = px.bar(
-                df_seccion,
-                x='SECCION',
-                y='CAJAS',
-                color='LOTES',
-                text='CAJAS',
-                color_continuous_scale=[[0, NUTRI_VERDE_CLARO], [1, NUTRI_VERDE]]
-            )
-            fig_seccion.update_traces(textposition='outside')
-            fig_seccion.update_layout(height=300)
-            st.plotly_chart(fig_seccion, use_container_width=True)
-        
-        # Semáforo de Vida Útil
-        st.markdown("---")
-        st.subheader("🚦 Semáforo de Vida Útil (FEFO)")
-        
-        col_s1, col_s2, col_s3 = st.columns(3)
-        
-        # Calcular grupos
-        df_vida = df[df['VIDA_UTIL_%'].notna()].copy() if 'VIDA_UTIL_%' in df.columns else pd.DataFrame()
-        criticos = df_vida[df_vida['VIDA_UTIL_%'] < 30] if not df_vida.empty else pd.DataFrame()
-        alerta = df_vida[(df_vida['VIDA_UTIL_%'] >= 30) & (df_vida['VIDA_UTIL_%'] < 50)] if not df_vida.empty else pd.DataFrame()
-        optimos = df_vida[df_vida['VIDA_UTIL_%'] >= 50] if not df_vida.empty else pd.DataFrame()
-        
-        with col_s1:
-            st.markdown("### 🔴 Crítico (<30%)")
-            st.markdown("**⚠️ Despacho Inmediato**")
-            st.metric("Lotes", len(criticos))
-            st.metric("Cajas", f"{criticos['CAJAS'].sum():,.0f}" if not criticos.empty else "0")
-            if not criticos.empty:
-                st.dataframe(
-                    criticos[['LOTE', 'DESCRIPCION', 'VIDA_UTIL_%', 'CAJAS']].head(5),
-                    hide_index=True,
-                    height=150
-                )
-        
-        with col_s2:
-            st.markdown("### 🟡 Alerta (30-50%)")
-            st.markdown("**⏰ Priorizar Despacho**")
-            st.metric("Lotes", len(alerta))
-            st.metric("Cajas", f"{alerta['CAJAS'].sum():,.0f}" if not alerta.empty else "0")
-            if not alerta.empty:
-                st.dataframe(
-                    alerta[['LOTE', 'DESCRIPCION', 'VIDA_UTIL_%', 'CAJAS']].head(5),
-                    hide_index=True,
-                    height=150
-                )
-        
-        with col_s3:
-            st.markdown("### 🟢 Óptimo (>50%)")
-            st.markdown("**✅ Estado Normal**")
-            st.metric("Lotes", len(optimos))
-            st.metric("Cajas", f"{optimos['CAJAS'].sum():,.0f}" if not optimos.empty else "0")
-            if not optimos.empty:
-                st.dataframe(
-                    optimos[['LOTE', 'DESCRIPCION', 'VIDA_UTIL_%', 'CAJAS']].head(5),
-                    hide_index=True,
-                    height=150
-                )
-        
-        # Gráfico de barras apiladas
-        st.markdown("---")
-        st.subheader("📈 Inventario por Producto y Estado")
-        
-        df_pivot = df.groupby(['DESCRIPCION', 'ESTADO'])['CAJAS'].sum().reset_index()
-        
-        fig_stacked = px.bar(
-            df_pivot,
-            x='DESCRIPCION',
-            y='CAJAS',
-            color='ESTADO',
-            barmode='stack',
-            color_discrete_map={
-                'LIBRE UTILIZACIÓN': NUTRI_VERDE,
-                'RETENIDA': '#F44336',
-                'PRODUCCIÓN': '#FFC107',
-                'NOVEDADES': '#FF9800'
-            }
-        )
-        fig_stacked.update_layout(
-            xaxis_tickangle=-45,
-            height=400,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(t=50, b=100)
-        )
-        st.plotly_chart(fig_stacked, use_container_width=True)
-        
-        # Estadísticas adicionales
-        st.markdown("---")
-        col_stat1, col_stat2 = st.columns(2)
-        
-        with col_stat1:
-            st.subheader("📊 % por Estado")
-            total_cajas = df['CAJAS'].sum()
-            if total_cajas > 0:
-                for estado in ESTADOS:
-                    cajas_estado = df[df['ESTADO'] == estado]['CAJAS'].sum()
-                    pct = (cajas_estado / total_cajas) * 100
-                    color = {'LIBRE UTILIZACIÓN': '🟢', 'RETENIDA': '🔴', 'PRODUCCIÓN': '🟡', 'NOVEDADES': '🟠'}.get(estado, '⚪')
-                    st.write(f"{color} **{estado}**: {pct:.1f}% ({cajas_estado:,.0f} cajas)")
-        
-        with col_stat2:
-            st.subheader("📅 Próximos a Vencer")
-            if 'FECHA_CADUCIDAD' in df.columns:
-                df['FECHA_CADUCIDAD'] = pd.to_datetime(df['FECHA_CADUCIDAD'], errors='coerce')
-                hoy = datetime.now()
-                proximos_7_dias = df[df['FECHA_CADUCIDAD'] <= hoy + timedelta(days=7)]
-                proximos_15_dias = df[(df['FECHA_CADUCIDAD'] > hoy + timedelta(days=7)) & 
-                                      (df['FECHA_CADUCIDAD'] <= hoy + timedelta(days=15))]
-                
-                st.metric("⚠️ Vencen en 7 días", f"{len(proximos_7_dias)} lotes")
-                st.metric("⏰ Vencen en 15 días", f"{len(proximos_15_dias)} lotes")
+    # ── KPIs globales ────────────────────────────────────────────────────────
+    total_solicitado  = df_result["Unidades_Solicitadas"].sum()
+    total_facturado   = df_result["Unidades_Facturadas"].sum()
+    fill_global       = (total_facturado / total_solicitado * 100) if total_solicitado > 0 else 0
+    total_cajas_oc    = df_result["Cajas_Solicitadas"].sum()
+    total_cajas_fact  = df_result["Cajas_Facturadas_Estimadas"].sum()
+    fill_global_oc    = (total_cajas_fact / total_cajas_oc * 100) if total_cajas_oc > 0 else 0
+    items_con_brecha  = (df_result["Brecha_Unidades"] > 0).sum()
+    items_totales     = len(df_result)
 
-# ============================================
-# TAB 4: REPORTES
-# ============================================
-with tab4:
-    st.header("📥 Generación de Reportes")
-    
-    if st.session_state.inventario.empty:
-        st.info("📭 No hay datos para exportar.")
-    else:
-        # Resumen
-        st.subheader("📊 Resumen del Inventario")
-        
-        col_r1, col_r2 = st.columns(2)
-        
-        with col_r1:
-            resumen = st.session_state.inventario.groupby('ESTADO').agg({
-                'CAJAS': 'sum',
-                'UNIDADES': 'sum',
-                'PALLETS': 'sum',
-                'ID': 'count'
-            }).rename(columns={'ID': 'REGISTROS'}).reset_index()
-            
-            st.dataframe(resumen, use_container_width=True, hide_index=True)
-        
-        with col_r2:
-            st.markdown("**📋 El reporte incluye:**")
-            st.write("✅ Hoja con inventario completo")
-            st.write("✅ Hojas separadas por estado")
-            st.write("✅ Hoja de resumen ejecutivo")
-            st.write("✅ Fechas y vida útil calculada")
-        
-        st.markdown("---")
-        
-        # Botón de descarga
-        nombre_archivo = f"Inventario_Lacteos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
-        with col_btn2:
-            excel_data = exportar_excel()
-            st.download_button(
-                label="📥 DESCARGAR REPORTE EXCEL",
-                data=excel_data,
-                file_name=nombre_archivo,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-        
-        st.markdown("---")
-        st.info(f"📁 Archivo: **{nombre_archivo}**")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Fill Rate Global", f"{fill_global:.1f} %")
+    col2.metric("Cumplimiento OC (Cajas)", f"{fill_global_oc:.1f} %")
+    col3.metric("Unidades Solicitadas", f"{int(total_solicitado):,}")
+    col4.metric("Unidades Facturadas", f"{int(total_facturado):,}")
 
-# ============================================
-# BARRA LATERAL
-# ============================================
-with st.sidebar:
-    # Título con emoji en lugar de imagen
-    st.markdown("## 🥛 NUTRI")
-    st.markdown("### Lácteos San Antonio C.A.")
-    st.markdown("**Sistema de Control de Inventario**")
-    st.markdown("---")
-    
-    # Stats rápidos
-    if not st.session_state.inventario.empty:
-        st.markdown("### 📊 Resumen Rápido")
-        
-        total_registros = len(st.session_state.inventario)
-        total_cajas = st.session_state.inventario['CAJAS'].sum()
-        total_pallets = st.session_state.inventario['PALLETS'].sum()
-        
-        st.metric("📝 Registros", total_registros)
-        st.metric("📦 Cajas", f"{total_cajas:,.0f}")
-        st.metric("🎯 Pallets", f"{total_pallets:,.0f}")
-        
-        # Alertas
-        if 'VIDA_UTIL_%' in st.session_state.inventario.columns:
-            criticos = len(st.session_state.inventario[st.session_state.inventario['VIDA_UTIL_%'] < 30])
-            if criticos > 0:
-                st.error(f"🔴 {criticos} lotes CRÍTICOS")
-        
-        # Distribución por sección
-        if 'SECCION' in st.session_state.inventario.columns:
-            secciones_usadas = st.session_state.inventario['SECCION'].nunique()
-            st.metric("📍 Secciones activas", secciones_usadas)
-    else:
-        st.info("📭 Sin datos aún")
-    
-    st.markdown("---")
-    st.markdown("### 📖 Guía Rápida")
-    st.markdown("""
-    1. **📝 Ingreso**: Registrar lotes
-    2. **📋 Inventario**: Ver/filtrar datos
-    3. **📊 Gráficos**: Análisis visual
-    4. **📥 Reportes**: Exportar Excel
-    """)
-    
-    st.markdown("---")
-    st.markdown(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    st.markdown("🧠 **GEM - Analítica de Datos**")
+    col5, _ = st.columns([1, 3])
+    col5.metric(
+        "Ítems con Brecha",
+        f"{items_con_brecha} / {items_totales}",
+        delta=f"-{int(total_solicitado - total_facturado):,} uds" if items_con_brecha else None,
+        delta_color="inverse",
+    )
+
+    st.divider()
+
+    # ── Tabla interactiva ────────────────────────────────────────────────────
+    st.subheader("📋 Análisis Detallado por Ítem")
+    st.caption(
+        "Completa las columnas **Motivo de Falta** y **Acción Correctiva** "
+        "para los ítems con brecha. Los cambios se incluyen en el reporte enviado a Google Sheets."
+    )
+
+    # Columnas visibles en el editor (reordenadas para legibilidad)
+    cols_display = [
+        "Material_Ref",
+        "Descripcion_OC",
+        "Cajas_Solicitadas",
+        "UXC",
+        "Unidades_Solicitadas",
+        "Unidades_Facturadas",
+        "Fill_Rate_%",
+        "Cumplimiento_OC_%",
+        "Brecha_Unidades",
+        "Motivo de Falta",
+        "Acción Correctiva",
+    ]
+
+    # Configuración de columnas del editor
+    column_config = {
+        "Material_Ref": st.column_config.TextColumn(
+            "Código Material", help="Referencia del proveedor", width="medium"
+        ),
+        "Descripcion_OC": st.column_config.TextColumn(
+            "Descripción", width="large"
+        ),
+        "Cajas_Solicitadas": st.column_config.NumberColumn(
+            "Cajas OC", format="%.0f"
+        ),
+        "UXC": st.column_config.NumberColumn(
+            "UXC", format="%.0f"
+        ),
+        "Unidades_Solicitadas": st.column_config.NumberColumn(
+            "Uds. Solicitadas", format="%.0f"
+        ),
+        "Unidades_Facturadas": st.column_config.NumberColumn(
+            "Uds. Facturadas", format="%.0f"
+        ),
+        "Fill_Rate_%": st.column_config.ProgressColumn(
+            "Fill Rate %",
+            help="Porcentaje de cumplimiento",
+            min_value=0,
+            max_value=100,
+            format="%.1f %%",
+        ),
+        "Cumplimiento_OC_%": st.column_config.ProgressColumn(
+            "% Cumplimiento OC",
+            help="Cumplimiento por línea de orden de compra (en cajas)",
+            min_value=0,
+            max_value=100,
+            format="%.1f %%",
+        ),
+        "Brecha_Unidades": st.column_config.NumberColumn(
+            "Brecha (uds)", format="%.0f"
+        ),
+        "Motivo de Falta": st.column_config.SelectboxColumn(
+            "Motivo de Falta",
+            options=MOTIVOS,
+            help="Selecciona la causa de la brecha",
+            required=False,
+            width="medium",
+        ),
+        "Acción Correctiva": st.column_config.TextColumn(
+            "Acción Correctiva",
+            help="Detalla la acción para corregir la brecha",
+            width="large",
+        ),
+    }
+
+    df_edited = st.data_editor(
+        df_result[cols_display],
+        column_config=column_config,
+        disabled=[c for c in cols_display if c not in ("Motivo de Falta", "Acción Correctiva")],
+        use_container_width=True,
+        hide_index=True,
+        key="editor_principal",
+    )
+
+    # Sincronizar ediciones al DataFrame completo
+    df_result["Motivo de Falta"]   = df_edited["Motivo de Falta"]
+    df_result["Acción Correctiva"] = df_edited["Acción Correctiva"]
+
+    # ── Gráfico de barras Fill Rate por ítem ─────────────────────────────────
+    st.divider()
+    st.subheader("📊 Fill Rate por Producto")
+
+    chart_df = df_result[["Descripcion_OC", "Fill_Rate_%"]].copy()
+    chart_df = chart_df.sort_values("Fill_Rate_%", ascending=True)
+    chart_df = chart_df.rename(columns={"Descripcion_OC": "Producto", "Fill_Rate_%": "Fill Rate %"})
+    st.bar_chart(chart_df.set_index("Producto"), color="#1e88e5", height=350)
+
+    # ── Ítems sin cruce en facturación ───────────────────────────────────────
+    sin_factura = df_result[df_result["Unidades_Facturadas"] == 0]
+    if not sin_factura.empty:
+        with st.expander(
+            f"⚠️ {len(sin_factura)} ítem(s) sin registro en facturación", expanded=False
+        ):
+            st.dataframe(
+                sin_factura[["Material_Ref", "Descripcion_OC", "Unidades_Solicitadas"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # ── Exportación ──────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("☁️ Subir Reporte a Google Sheets (Gratis)")
+    st.caption(
+        "Carga el reporte final usando Apps Script Web App. "
+        "No requiere Google Cloud Console ni cuenta de servicio."
+    )
+
+    webapp_url = st.text_input(
+        "URL del Web App (Apps Script)",
+        help="Debe terminar en /exec.",
+    )
+    webhook_token = st.text_input(
+        "Token del Webhook",
+        type="password",
+        help="Debe ser igual al token configurado en tu Apps Script.",
+    )
+    worksheet_name = st.text_input("Nombre de la pestaña", value="Reporte Fill Rate")
+    st.caption(
+        "Tip: en tu Apps Script, implementa doPost(e) y publica como Aplicacion web "
+        "con acceso 'Cualquiera con el enlace'."
+    )
+
+    st.markdown(
+        "**Sheet destino sugerido:** "
+        "https://docs.google.com/spreadsheets/d/1Pob-5u0VDlWQgj3PQEDXcaGB-aylsbcWMfUNEozWlOw/edit"
+    )
+
+    st.text_input(
+        "ID del Google Sheet (referencia)",
+        value="1Pob-5u0VDlWQgj3PQEDXcaGB-aylsbcWMfUNEozWlOw",
+        disabled=True,
+        help=(
+            "No se usa en este modo. El destino real lo define la URL del Web App, "
+            "que debe estar creado dentro de esta hoja de calculo."
+        ),
+    )
+
+    export_cols = [
+        "Material_Ref",
+        "Descripcion_OC",
+        "Cajas_Solicitadas",
+        "UXC",
+        "Unidades_Solicitadas",
+        "Unidades_Facturadas",
+        "Fill_Rate_%",
+        "Cumplimiento_OC_%",
+        "Brecha_Unidades",
+        "Motivo de Falta",
+        "Acción Correctiva",
+    ]
+    df_export = df_result[export_cols].copy()
+    df_export.rename(
+        columns={
+            "Material_Ref":         "Código Material",
+            "Descripcion_OC":       "Descripción",
+            "Cajas_Solicitadas":    "Cajas OC",
+            "Unidades_Solicitadas": "Unidades Solicitadas",
+            "Unidades_Facturadas":  "Unidades Facturadas",
+            "Fill_Rate_%":          "Fill Rate %",
+            "Cumplimiento_OC_%":    "% Cumplimiento OC",
+            "Brecha_Unidades":      "Brecha (uds)",
+        },
+        inplace=True,
+    )
+
+    if st.button("Subir reporte a Google Sheets", type="primary"):
+        if not webapp_url.strip():
+            st.error("Debes ingresar la URL del Web App de Apps Script.")
+        elif not webapp_url.strip().endswith("/exec"):
+            st.error("La URL parece invalida. Debe terminar en '/exec'.")
+        elif not webhook_token.strip():
+            st.error("Debes ingresar el token del webhook.")
+        else:
+            try:
+                upload_to_apps_script(
+                    df_export=df_export,
+                    webapp_url=webapp_url.strip(),
+                    token=webhook_token.strip(),
+                    worksheet_name=worksheet_name.strip() or "Reporte Fill Rate",
+                )
+                st.success("Reporte subido correctamente a Google Sheets.")
+            except Exception as e:
+                st.error(f"No se pudo subir el reporte: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    main()
