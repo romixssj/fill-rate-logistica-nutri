@@ -149,8 +149,13 @@ def aggregate_order_lines(df: pd.DataFrame, quantity_column: str) -> pd.DataFram
     )
 
 
-def validate_order_sets(df_oc: pd.DataFrame, df_fact: pd.DataFrame, manual_order_number: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Valida que ambos lados contengan exactamente los mismos números de orden."""
+def validate_order_sets(
+    df_oc: pd.DataFrame,
+    df_fact: pd.DataFrame,
+    manual_order_number: str,
+    strict_mode: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Valida órdenes y alinea ambos lados al conjunto común cuando hay ruido."""
     manual_order_number = normalize_order_number(manual_order_number)
 
     if manual_order_number:
@@ -177,15 +182,32 @@ def validate_order_sets(df_oc: pd.DataFrame, df_fact: pd.DataFrame, manual_order
     oc_orders = set(df_oc["Numero_Orden"].astype(str))
     fact_orders = set(df_fact["Numero_Orden"].astype(str))
 
+    common_orders = sorted(oc_orders & fact_orders)
+    if not common_orders:
+        raise ValueError(
+            "❌ No hay números de orden en común entre OC y facturación. "
+            f"OC detectadas: {sorted(oc_orders)} · Facturación detectadas: {sorted(fact_orders)}"
+        )
+
+    warning_msg = ""
+
     if oc_orders != fact_orders:
         only_oc = sorted(oc_orders - fact_orders)
         only_fact = sorted(fact_orders - oc_orders)
-        raise ValueError(
-            "❌ Los números de orden no coinciden entre Orden de Compra y Facturación. "
+        if strict_mode:
+            raise ValueError(
+                "❌ Modo estricto activo: los números de orden no coinciden entre OC y facturación. "
+                f"Solo en OC: {only_oc or 'ninguno'} · Solo en Facturación: {only_fact or 'ninguno'}"
+            )
+        warning_msg = (
+            "⚠️ Se detectaron órdenes extra y se filtraron automáticamente al cruce común. "
             f"Solo en OC: {only_oc or 'ninguno'} · Solo en Facturación: {only_fact or 'ninguno'}"
         )
 
-    return df_oc, df_fact
+    df_oc = df_oc[df_oc["Numero_Orden"].isin(common_orders)].copy()
+    df_fact = df_fact[df_fact["Numero_Orden"].isin(common_orders)].copy()
+
+    return df_oc, df_fact, warning_msg
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -213,7 +235,20 @@ def parse_html_order(raw_bytes: bytes, filename: str = "") -> pd.DataFrame:
     """
     soup = BeautifulSoup(raw_bytes, "html.parser")
     tabla = soup.find("table", {"id": "AutoNumber2"})
-    order_number = extract_order_number(soup.get_text(" ", strip=True), filename)
+    order_number = ""
+
+    # Extrae explícitamente la fila de "NUMERO DE ORDEN" cuando existe.
+    for fila in soup.find_all("tr"):
+        cells_text = [cell.get_text(" ", strip=True).upper() for cell in fila.find_all(["td", "th"])]
+        if any("NUMERO DE ORDEN" in text for text in cells_text):
+            full_row_text = " ".join(cells_text)
+            match = re.search(r"NUMERO\s*DE\s*ORDEN\D*([A-Z0-9-]{5,})", full_row_text)
+            if match:
+                order_number = normalize_order_number(match.group(1))
+                break
+
+    if not order_number:
+        order_number = extract_order_number(soup.get_text(" ", strip=True), filename)
 
     if tabla is None:
         raise ValueError(
@@ -295,7 +330,7 @@ def parse_smx_order(raw_bytes: bytes, filename: str = "") -> pd.DataFrame:
         raise ValueError(f"❌ No se pudo leer el archivo Excel: {e}")
 
     preview_text = " ".join(df_raw.head(20).fillna("").astype(str).values.flatten())
-    order_number = extract_order_number(preview_text, filename)
+    fallback_order_number = extract_order_number(preview_text, filename)
 
     # Filtrar filas de ítem (tipo '2')
     mask_items = df_raw.iloc[:, 0].astype(str).str.strip() == "2"
@@ -312,6 +347,8 @@ def parse_smx_order(raw_bytes: bytes, filename: str = "") -> pd.DataFrame:
         try:
             referencia   = str(fila.iloc[3]).strip()
             descripcion  = str(fila.iloc[2]).strip()
+            order_number = normalize_order_number(str(fila.iloc[21])) if len(fila) > 21 else ""
+            order_number = order_number or fallback_order_number
             # UNMA viene como '0012' → 12 ; '0008' → 8
             uxc          = to_float_safe(str(fila.iloc[8]).lstrip("0") or "1")
             cant_cajas   = to_float_safe(str(fila.iloc[18]).lstrip("0") or "0")
@@ -414,6 +451,8 @@ def parse_billing(raw_bytes: bytes, filename: str, fallback_order_number: str = 
             "Numero de orden",
             "Nro Orden",
             "Documento",
+            "Referencia de cliente",
+            "Referencia cliente",
         ],
     )
     file_order_number = extract_order_number(filename=filename)
@@ -423,6 +462,10 @@ def parse_billing(raw_bytes: bytes, filename: str, fallback_order_number: str = 
 
     df["Numero_Orden"] = df["Numero_Orden"].replace("", file_order_number)
     df["Numero_Orden"] = df["Numero_Orden"].replace("", normalize_order_number(fallback_order_number))
+
+    # Limpieza mínima de datos sucios: ignora filas sin cantidad/referencia.
+    df = df[df["Cantidad facturada"] > 0].copy()
+    df = df[df["Referencia_Cruce_Norm"].astype(str).str.strip() != ""].copy()
 
     # Agregar descripción si existe
     agg_dict = {"Cantidad facturada": "sum"}
@@ -602,6 +645,16 @@ def main():
         st.header("📂 Cargar Archivos")
         st.caption("Puedes subir uno o varios archivos por cada fuente.")
 
+        match_mode = st.selectbox(
+            "Modo de validación de órdenes",
+            ["Flexible (recomendado)", "Estricto"],
+            help=(
+                "Flexible: filtra automáticamente al conjunto común de órdenes. "
+                "Estricto: detiene el análisis si no coinciden exactamente."
+            ),
+        )
+        strict_mode = match_mode == "Estricto"
+
         manual_order_number = st.text_input(
             "Número de orden manual (opcional)",
             help="Úsalo si algún archivo no trae el número de orden o quieres forzar una validación única.",
@@ -611,7 +664,10 @@ def main():
             "1️⃣  Reporte de Facturación",
             type=["xlsx", "xls", "csv"],
             accept_multiple_files=True,
-            help="Debe contener las columnas 'Material' y 'Cantidad facturada'.",
+            help=(
+                "Debe contener 'Cantidad facturada' y una referencia para cruce "
+                "(ideal: 'Referencia del cliente'; fallback: 'Material')."
+            ),
         )
 
         archivos_oc = st.file_uploader(
@@ -674,10 +730,18 @@ def main():
             st.stop()
 
     try:
-        df_oc, df_fact = validate_order_sets(df_oc, df_fact, manual_order_number)
+        df_oc, df_fact, order_warning_msg = validate_order_sets(
+            df_oc,
+            df_fact,
+            manual_order_number,
+            strict_mode,
+        )
     except ValueError as e:
         st.error(str(e))
         st.stop()
+
+    if order_warning_msg:
+        st.warning(order_warning_msg)
 
     # Cruce y Fill Rate
     df_result = compute_fill_rate(df_oc, df_fact)
