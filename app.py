@@ -572,8 +572,20 @@ def upload_to_apps_script(
         "rows": rows,
     }
 
-    response = requests.post(webapp_url, json=payload, timeout=60)
-    response.raise_for_status()
+    try:
+        response = requests.post(webapp_url, json=payload, timeout=60)
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            raise ValueError(
+                "Error de autorización con Apps Script (401/403). "
+                "Revisa que la implementación Web App esté publicada con acceso 'Cualquiera con el enlace' "
+                "y que la URL sea la de '/exec' activa."
+            )
+        raise ValueError(f"Error HTTP al subir reporte: {e}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"No se pudo conectar con Apps Script: {e}")
 
     try:
         data = response.json()
